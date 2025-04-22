@@ -1,16 +1,15 @@
 use colored::Colorize;
 use map_3d::{ecef2geodetic, Ellipsoid};
-use once_cell::sync::Lazy;
 use std::sync::{Arc, Mutex};
 
 use gnss_rtk::prelude::{
-    Candidate, Carrier, ClockCorrection, Config, Duration, Epoch, IonoComponents, Method,
-    Observation, OrbitSource, Solver, TropoComponents, Vector3, SV,
+    Candidate, Carrier, ClockCorrection, Config, Duration, Epoch, Frame, IonoComponents, Method,
+    Observation, Orbit, Solver, TropoComponents, Vector3,
 };
 
 use crate::{
     constants::{EARTH_MU_GPS, EARTH_ROTATION_RATE, SPEED_OF_LIGHT},
-    ephemeris::Ephemeris,
+    ephemeris::{Ephemeris, EphemerisPool},
     state::GnssState,
 };
 
@@ -93,33 +92,23 @@ fn compute_sv_position_ecef(eph: &Ephemeris, t: Epoch) -> (f64, f64, f64) {
     (ecef_x, ecef_y, ecef_z)
 }
 
-pub type I = fn(Epoch, SV, usize) -> Option<InterpolationResult>;
-pub struct PositionSolver<O: OrbitSource> {
-    solver: Solver<O>,
+pub struct PositionSolver {
+    solver: Solver<EphemerisPool>,
     pub_state: Arc<Mutex<GnssState>>,
 }
 
-static SOLVER_EPHEMERIS: Lazy<Mutex<Vec<Ephemeris>>> =
-    Lazy::new(|| Mutex::new(Vec::<Ephemeris>::new()));
-
-fn sv_interp(t: Epoch, sv: SV, _size: usize) -> Option<InterpolationResult> {
-    let ephs = SOLVER_EPHEMERIS.lock().unwrap();
-    let eph = ephs.iter().find(|&&e| e.sv == sv).unwrap();
-    let pos = compute_sv_position_ecef(eph, t);
-
-    Some(InterpolationResult::from_apc_position(pos))
-}
-
-impl<O: OrbitSource> PositionSolver<O> {
+impl PositionSolver {
     #[allow(clippy::new_without_default)]
-    pub fn new(pub_state: Arc<Mutex<GnssState>>) -> Self {
-        let apriori = AprioriPosition::from_geo(Vector3::new(46.5, 6.6, 0.0));
+    pub fn new(deploy_t: Epoch, earth_cef: Frame, pub_state: Arc<Mutex<GnssState>>) -> Self {
+        // Please wait for next version prior removing the initial guess.
+        let (x_km, y_km, z_km) = (0.0, 0.0, 0.0); // Paris ECEF
+        let initial_state = Orbit::from_position(x_km, y_km, z_km, deploy_t, earth_cef);
 
         let mut cfg = Config::static_ppp_preset(Method::SPP);
 
         cfg.min_sv_elev = Some(10.0);
 
-        let solver = Solver::new(&cfg, apriori, sv_interp as I).expect("Solver issue");
+        let solver = Solver::new(&cfg, Some(initial));
 
         Self { solver, pub_state }
     }

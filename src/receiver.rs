@@ -1,13 +1,11 @@
 use colored::Colorize;
-use gnss_rs::constellation::Constellation;
-use gnss_rs::sv::SV;
 use rayon::prelude::*;
 use rustfft::num_complex::Complex64;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::channel::Channel;
 use crate::device::RtlSdrDevice;
@@ -16,6 +14,8 @@ use crate::recording::IQFileType;
 use crate::recording::IQRecording;
 use crate::solver::PositionSolver;
 use crate::state::GnssState;
+
+use gnss_rtk::prelude::{Almanac as AniseAlmanac, Constellation, EARTH_J2000, SV};
 
 const PERIOD_RCV: f64 = 0.001;
 
@@ -124,6 +124,12 @@ impl Receiver {
             exit_req.clone(),
         )
         .unwrap();
+
+        let almanac = AniseAlmanac::until_2035()
+            .unwrap_or_else(|e| panic!("anise deployment error: {}", e));
+
+        let earth_cef = almanac.frame_from_uid(EARTH_J2000)
+            .unwrap_or_else(|e| panic!("anise deployment error: {}", e));
 
         Self {
             read_iq_fn,

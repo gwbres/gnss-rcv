@@ -1,12 +1,12 @@
 use colored::Colorize;
-use gnss_rs::sv::SV;
-use gnss_rtk::prelude::{
-    AprioriPosition, Candidate, Carrier, Config, Duration, Epoch, InterpolationResult,
-    IonosphereBias, Method, Observation, Solver, TroposphereBias, Vector3,
-};
-use map_3d::{Ellipsoid, ecef2geodetic};
+use map_3d::{ecef2geodetic, Ellipsoid};
 use once_cell::sync::Lazy;
 use std::sync::{Arc, Mutex};
+
+use gnss_rtk::prelude::{
+    Candidate, Carrier, ClockCorrection, Config, Duration, Epoch, IonoComponents, Method,
+    Observation, OrbitSource, Solver, TropoComponents, Vector3, SV,
+};
 
 use crate::{
     constants::{EARTH_MU_GPS, EARTH_ROTATION_RATE, SPEED_OF_LIGHT},
@@ -93,23 +93,9 @@ fn compute_sv_position_ecef(eph: &Ephemeris, t: Epoch) -> (f64, f64, f64) {
     (ecef_x, ecef_y, ecef_z)
 }
 
-fn get_tropo_iono_bias() -> (TroposphereBias, IonosphereBias) {
-    let iono_bias = IonosphereBias {
-        kb_model: None,
-        bd_model: None,
-        ng_model: None,
-        stec_meas: None,
-    };
-    let tropo_bias = TroposphereBias {
-        total: None,
-        zwd_zdd: None,
-    };
-    (tropo_bias, iono_bias)
-}
-
 pub type I = fn(Epoch, SV, usize) -> Option<InterpolationResult>;
-pub struct PositionSolver {
-    solver: Solver<I>,
+pub struct PositionSolver<O: OrbitSource> {
+    solver: Solver<O>,
     pub_state: Arc<Mutex<GnssState>>,
 }
 
@@ -124,12 +110,14 @@ fn sv_interp(t: Epoch, sv: SV, _size: usize) -> Option<InterpolationResult> {
     Some(InterpolationResult::from_apc_position(pos))
 }
 
-impl PositionSolver {
+impl<O: OrbitSource> PositionSolver<O> {
     #[allow(clippy::new_without_default)]
     pub fn new(pub_state: Arc<Mutex<GnssState>>) -> Self {
         let apriori = AprioriPosition::from_geo(Vector3::new(46.5, 6.6, 0.0));
-        let mut cfg = Config::static_preset(Method::SPP);
-        cfg.min_sv_elev = Some(0.0);
+
+        let mut cfg = Config::static_ppp_preset(Method::SPP);
+
+        cfg.min_sv_elev = Some(10.0);
 
         let solver = Solver::new(&cfg, apriori, sv_interp as I).expect("Solver issue");
 
@@ -157,7 +145,7 @@ impl PositionSolver {
          *  sat1      [------]
          *  sat2      [-------------]
          */
-        let mut pool: Vec<Candidate> = vec![];
+        let mut pool = Vec::<Candidate>::with_capacity(8);
         let mut min_gpst = ephs[0].tow_gpst + Duration::from_seconds(ts_sec - ephs[0].ts_sec);
         for eph in ephs {
             let e_gpst = eph.tow_gpst + Duration::from_seconds(ts_sec - eph.ts_sec);
@@ -170,45 +158,56 @@ impl PositionSolver {
         for eph in ephs {
             let e_gpst = eph.tow_gpst + Duration::from_seconds(ts_sec - eph.ts_sec);
             let pseudo_range_sec = (e_gpst - min_gpst).to_seconds() + eph.code_off_sec;
-            let pseudo_range = pseudo_range_sec * SPEED_OF_LIGHT;
+            let pseudo_range_m = pseudo_range_sec * SPEED_OF_LIGHT;
             let dt = (now_gpst - eph.tow_gpst).to_seconds();
-            let clock_corr = eph.f0 + eph.f1 * dt + eph.f2 * dt.powi(2);
+
+            let clock_corr_s = eph.f0 + eph.f1 * dt + eph.f2 * dt.powi(2);
             assert!(dt >= 0.0);
 
             log::warn!("{} - e_gpst={:?} eph.ts={}", eph.sv, e_gpst, eph.ts_sec);
             log::warn!(
-                "{} - prng={pseudo_range_sec:+e}sec/{pseudo_range:.1}m tgd={:+e} clock_corr={clock_corr}",
+                "{} - prng={pseudo_range_sec:+e}sec/{pseudo_range_m:.1}m tgd={:+e} clock_corr={clock_corr_s}s",
                 eph.sv,
                 eph.tgd,
             );
 
-            let candidate = Candidate::new(
-                eph.sv,
-                now_gpst,
-                Duration::from_seconds(0.0),
-                Some(Duration::from_seconds(eph.tgd)),
-                vec![Observation {
-                    carrier: Carrier::L1,
-                    value: pseudo_range,
-                    snr: Some(eph.cn0),
-                }],
-                vec![],
-                vec![],
-            );
+            // wrap an Observation.
+            // NB: limited to Method::SPP as long as only L1 remains accessible.
+            let observation = Observation::pseudo_range(Carrier::L1, pseudo_range_m, Some(eph.cn0));
+
+            // form a Candidate
+            let mut candidate = Candidate::new(eph.sv, now_gpst, vec![observation]);
+
+            // the more information, the better.
+            let dt = Duration::from_seconds(clock_corr_s);
+
+            let clock_correction = ClockCorrection::without_relativistic_correction(dt);
+            candidate.set_clock_correction(clock_correction);
+
+            let tgd = Duration::from_seconds(eph.tgd);
+            candidate.set_group_delay(tgd);
+
+            // if you remain limited to L1(PR) and can access this information,
+            // then define it here to improve your solutions.
+            candidate.set_iono_components(IonoComponents::Unknown);
+
+            // Other value here would bypass internal model.
+            // Internal models work well as long as you apply a >10° elev mask.
+            candidate.set_tropo_components(TropoComponents::Unknown);
 
             pool.push(candidate);
         }
 
-        let (tropo_bias, iono_bias) = get_tropo_iono_bias();
-        let res = self
-            .solver
-            .resolve(now_gpst, &pool, &iono_bias, &tropo_bias);
+        let res = self.solver.resolve(now_gpst, &pool);
 
         match res {
             Err(err) => log::warn!("Failed to get a position: {err}"),
-            Ok(solution) => {
-                let pos = solution.1.position;
-                let (lat_rad, lon_rad, h) = ecef2geodetic(pos[0], pos[1], pos[2], Ellipsoid::WGS84);
+            Ok((t, pvt_solution)) => {
+                let pos_vel_m_s = pvt_solution.state.to_cartesian_pos_vel() * 1.0E3;
+                let pos_m = (pos_vel_m_s[0], pos_vel_m_s[1], pos_vel_m_s[2]);
+
+                let (lat_rad, lon_rad, h) =
+                    ecef2geodetic(pos_m[0], pos_m[1], pos_m[2], Ellipsoid::WGS84);
                 let lat = lat_rad * 180.0 / PI;
                 let lon = lon_rad * 180.0 / PI;
                 let height = h / 1000.0;

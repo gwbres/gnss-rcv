@@ -3,8 +3,8 @@ use map_3d::{ecef2geodetic, Ellipsoid};
 use std::sync::{Arc, Mutex};
 
 use gnss_rtk::prelude::{
-    Candidate, Carrier, ClockCorrection, Config, Duration, Epoch, Frame, IonoComponents, Method,
-    Observation, Orbit, Solver, TropoComponents, Vector3,
+    Almanac as AniseAlmanac, Bias, Candidate, Carrier, ClockCorrection, Config, Duration, Epoch,
+    Frame, Method, Observation, Orbit, Solver, Time, Vector3,
 };
 
 use crate::{
@@ -14,6 +14,12 @@ use crate::{
 };
 
 const PI: f64 = std::f64::consts::PI;
+
+mod bias;
+mod time;
+
+use bias::BiasSource;
+use time::NullTime;
 
 fn get_eccentric_anomaly(eph: &Ephemeris, t_k: f64) -> f64 {
     // computed mean motion
@@ -93,27 +99,38 @@ fn compute_sv_position_ecef(eph: &Ephemeris, t: Epoch) -> (f64, f64, f64) {
 }
 
 pub struct PositionSolver {
-    solver: Solver<EphemerisPool>,
+    solver: Solver<EphemerisPool, NullBias, NullTime>,
     pub_state: Arc<Mutex<GnssState>>,
 }
 
 impl PositionSolver {
     #[allow(clippy::new_without_default)]
-    pub fn new(deploy_t: Epoch, earth_cef: Frame, pub_state: Arc<Mutex<GnssState>>) -> Self {
-        // Please wait for next version prior removing the initial guess.
-        let (x_km, y_km, z_km) = (0.0, 0.0, 0.0); // Paris ECEF
-        let initial_state = Orbit::from_position(x_km, y_km, z_km, deploy_t, earth_cef);
+    pub fn new(
+        deploy_t: Epoch,
+        almanac: AniseAlmanac,
+        frame: Frame,
+        pub_state: Arc<Mutex<GnssState>>,
+    ) -> Self {
+        // NB: limited to SPP until as long as only L1 is available.
+        // NB: if L1 phase is available, gnss_rtk will soon propose code smoothing
+        //     for x10 improvements
+        let mut spp_cfg = Config::static_preset(Method::SPP);
+        spp_cfg.min_sv_elev = Some(10.0); // important, for tropo model
 
-        let mut cfg = Config::static_ppp_preset(Method::SPP);
+        let null_time = NullTime {};
+        let bias = BiasSource {};
 
-        cfg.min_sv_elev = Some(10.0);
+        let pool = EphemerisPool::new(8);
 
-        let solver = Solver::new(&cfg, Some(initial));
+        let solver = Solver::new_almanac_frame(
+            spp_cfg, almanac, frame, pool, null_time, bias,
+            None, // deploy without apriori knwoledge
+        );
 
         Self { solver, pub_state }
     }
 
-    pub fn compute_position(&mut self, ts_sec: f64, ephs: &Vec<Ephemeris>) {
+    pub fn compute_position(&mut self, ts_sec: f64, pool: &EphemerisPool) {
         {
             let mut glob_ephs = SOLVER_EPHEMERIS.lock().unwrap();
             *glob_ephs = ephs.clone();

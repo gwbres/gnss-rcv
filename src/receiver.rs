@@ -7,15 +7,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use crate::channel::Channel;
-use crate::device::RtlSdrDevice;
-use crate::network::RtlSdrTcp;
-use crate::recording::IQFileType;
-use crate::recording::IQRecording;
-use crate::solver::PositionSolver;
-use crate::state::GnssState;
+use crate::{
+    channel::Channel,
+    device::RtlSdrDevice,
+    network::RtlSdrTcp,
+    recording::{IQFileType, IQRecording},
+    solver::PositionSolver,
+    state::GnssState,
+};
 
-use gnss_rtk::prelude::{Almanac as AniseAlmanac, Constellation, EARTH_J2000, SV};
+use gnss_rtk::prelude::{Almanac as AniseAlmanac, Constellation, Epoch, EARTH_J2000, SV};
 
 const PERIOD_RCV: f64 = 0.001;
 
@@ -125,11 +126,14 @@ impl Receiver {
         )
         .unwrap();
 
-        let almanac = AniseAlmanac::until_2035()
+        let almanac =
+            AniseAlmanac::until_2035().unwrap_or_else(|e| panic!("anise deployment error: {}", e));
+
+        let earth_cef = almanac
+            .frame_from_uid(EARTH_J2000)
             .unwrap_or_else(|e| panic!("anise deployment error: {}", e));
 
-        let earth_cef = almanac.frame_from_uid(EARTH_J2000)
-            .unwrap_or_else(|e| panic!("anise deployment error: {}", e));
+        let deploy_t = Epoch::default();
 
         Self {
             read_iq_fn,
@@ -138,9 +142,9 @@ impl Receiver {
             cached_iq_vec: Vec::<Complex64>::new(),
             cached_ts_sec_tail: 0.0,
             channels,
-            solver: PositionSolver::new(state),
             last_fix_sec: 0.0,
             exit_req: exit_req.clone(),
+            solver: PositionSolver::new(deploy_t, almanac, earth_cef, state),
         }
     }
 

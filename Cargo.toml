@@ -31,7 +31,7 @@ egui_extras = "0.31.1"
 
 # until hifitime v4.1 & gnss-rtk v0.8
 gnss-rs = { git = "https://github.com/rtk-rs/gnss-rs", branch = "main" }
-gnss-rtk = { git = "https://github.com/rtk-rs/gnss-rtk", branch = "main", features = "embed_ephem" }
+gnss-rtk = { git = "https://github.com/rtk-rs/gnss-rtk", branch = "main", features = ["embed_ephem"] }
 
 [target.'cfg(unix)'.dependencies]
 rtlsdr_mt = { git = 'https://github.com/mx4/rtlsdr_mt.rs.git', rev = '8ae8911b06be9680b92ef40367e72134b186aae9' }

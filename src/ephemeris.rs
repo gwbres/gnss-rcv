@@ -1,6 +1,6 @@
 use colored::Colorize;
 
-use gnss_rtk::prelude::{SV, Epoch, Orbit, OrbitSource, Frame};
+use gnss_rtk::prelude::{Epoch, Frame, Orbit, OrbitSource, SV};
 
 use crate::{
     constants::{P2_19, P2_29, P2_31, P2_33, P2_43, P2_5, P2_55, SC2RAD},
@@ -154,13 +154,14 @@ impl EphemerisPool {
         Self {
             ephemeris: Vec::with_capacity(size),
         }
-    } 
+    }
 }
 
 impl OrbitSource for EphemerisPool {
-    fn next_at(&mut self, t: Epoch, sv: SV, fr: Frame, _: usize) -> Option<Orbit> {
-        let ephs = SOLVER_EPHEMERIS.lock().unwrap();
-        let eph = ephs.iter().find(|&&e| e.sv == sv).unwrap();
-        let pos = compute_sv_position_ecef(eph, t);
+    fn next_at(&mut self, t: Epoch, sv: SV, fr: Frame) -> Option<Orbit> {
+        // let ephs = SOLVER_EPHEMERIS.lock().unwrap();
+        // let eph = ephs.iter().find(|&&e| e.sv == sv).unwrap();
+        // let pos = compute_sv_position_ecef(eph, t);
+        None
     }
 }
